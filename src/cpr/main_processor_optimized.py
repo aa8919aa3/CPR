@@ -19,6 +19,9 @@ import warnings
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
+# Set matplotlib to use thread-safe backend
+os.environ['MPLBACKEND'] = 'Agg'
+
 # Import optimization libraries
 try:
     import numba
@@ -44,8 +47,16 @@ from scipy import stats
 from scipy.optimize import curve_fit
 from astropy.timeseries import LombScargle
 
-from .config import config
-from .logger import init_logger
+try:
+    from .config import config
+    from .logger import init_logger
+except ImportError:
+    # Fallback for direct execution
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from config import config
+    from logger import init_logger
 
 # Numba-optimized model function
 if HAS_NUMBA:
@@ -273,9 +284,14 @@ def generate_frequency_array(n_points, median_diff, n_freq=10000):
     return frequencies
 
 # Configuration for optimized processing
-MAX_WORKERS = min(8, multiprocessing.cpu_count())  # Limit workers to prevent memory issues
-PLOT_SIZE = (19.2, 10.8)  # 1920x1080 at 100 DPI
+MAX_WORKERS = min(2, multiprocessing.cpu_count())  # Reduced to 2 workers to prevent race conditions
+# Calculate exact figure size to get 1920x1080 pixel output
+PLOT_SIZE = (1920/100, 1080/100)  # 19.2 x 10.8 inches at 100 DPI = exactly 1920x1080 pixels
 PLOT_DPI = 100
+
+# Global locks for thread safety
+GLOBAL_PROCESSING_LOCK = threading.Lock()
+NUMBA_COMPILATION_LOCK = threading.Lock()
 
 # Adjust for matplotlib margins to get exactly 1920x1080
 EXACT_PLOT_SIZE = (19.2, 10.8)  # Use exact size, let matplotlib handle margins
@@ -289,6 +305,7 @@ class EnhancedJosephsonProcessor:
         
         # Thread-safe counters and output management
         self.output_lock = threading.Lock()
+        self.matplotlib_lock = threading.Lock()  # Protect matplotlib operations
         self.progress_counter = {'current': 0, 'total': 0}
         
         # Pre-compile numba functions
@@ -301,25 +318,26 @@ class EnhancedJosephsonProcessor:
         self.logger.logger.info(f"Plot size: {PLOT_SIZE} at {PLOT_DPI} DPI")
     
     def _precompile_numba(self):
-        """Pre-compile numba functions for better performance"""
-        self.logger.logger.info("Pre-compiling Numba functions...")
-        try:
-            # Dummy compilation
-            dummy_x = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-            dummy_y = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-            
-            if HAS_NUMBA:
-                _ = model_f_numba(dummy_x, 1.0, 0.0, 1.0, 0.5, 0.0, 0.0)
-                _ = calculate_statistics_numba(dummy_y, dummy_y, 6)
-                _ = preprocess_data_numba(dummy_x, dummy_y)
-                _ = calculate_phase_data_numba(dummy_x, 1.0)
-                _ = calculate_binned_average_numba(dummy_x/2, dummy_y)
-                self.logger.logger.info("✓ Numba functions compiled successfully")
-            else:
-                self.logger.logger.info("✓ Using non-Numba implementations")
+        """Pre-compile numba functions for better performance with thread safety"""
+        with NUMBA_COMPILATION_LOCK:  # Ensure only one thread compiles at a time
+            self.logger.logger.info("Pre-compiling Numba functions...")
+            try:
+                # Dummy compilation
+                dummy_x = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+                dummy_y = np.array([1.0, 2.0, 3.0], dtype=np.float64)
                 
-        except Exception as e:
-            self.logger.logger.warning(f"Numba compilation warning: {e}")
+                if HAS_NUMBA:
+                    _ = model_f_numba(dummy_x, 1.0, 0.0, 1.0, 0.5, 0.0, 0.0)
+                    _ = calculate_statistics_numba(dummy_y, dummy_y, 6)
+                    _ = preprocess_data_numba(dummy_x, dummy_y)
+                    _ = calculate_phase_data_numba(dummy_x, 1.0)
+                    _ = calculate_binned_average_numba(dummy_x/2, dummy_y)
+                    self.logger.logger.info("✓ Numba functions compiled successfully")
+                else:
+                    self.logger.logger.info("✓ Using non-Numba implementations")
+                    
+            except Exception as e:
+                self.logger.logger.warning(f"Numba compilation warning: {e}")
 
     def validate_data_array(self, data, name):
         """Validate data array for NaN/inf values and provide detailed diagnostics"""
@@ -384,6 +402,21 @@ class EnhancedJosephsonProcessor:
 
     def process_single_file(self, csv_file_path, output_dir):
         """Process a single CSV file and return analysis results with enhanced visualizations"""
+        # Add timeout to prevent deadlocks
+        try:
+            with GLOBAL_PROCESSING_LOCK:
+                return self._process_single_file_internal(csv_file_path, output_dir)
+        except Exception as e:
+            dataid = Path(csv_file_path).stem
+            self.update_progress(dataid, False, f"Lock timeout or error: {str(e)[:50]}...")
+            return {
+                'dataid': dataid,
+                'success': False,
+                'error': f'Lock timeout or error: {str(e)}'
+            }
+    
+    def _process_single_file_internal(self, csv_file_path, output_dir):
+        """Internal implementation of file processing"""
         try:
             # Extract filename without extension for use as dataid
             dataid = Path(csv_file_path).stem
@@ -606,43 +639,44 @@ class EnhancedJosephsonProcessor:
             # === ENHANCED VISUALIZATION WITH 1920x1080 PLOTS ===
             
             # 1. Plot the original data and the fitted curve (normalized)
-            plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI) 
+            with self.matplotlib_lock:  # Thread-safe matplotlib operations
+                plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI) 
             
-            # Sort data by x_data_normalized for proper line connection
-            sort_indices = np.argsort(x_data_normalized)
-            x_sorted = x_data_normalized[sort_indices]
-            y_sorted = y_data_normalized[sort_indices]
-            fitted_y_sorted = fitted_y_data[sort_indices]
-            
-            # Plot original data with dashed line connection
-            plt.plot(x_sorted, y_sorted, '--', color='blue', linewidth=1, alpha=0.7, label=f'{dataid} (connected)')
-            plt.scatter(x_data_normalized, y_data_normalized, color='blue', s=8, alpha=0.8, zorder=5)
-            
-            # Plot fitted curve
-            plt.plot(x_sorted, fitted_y_sorted, label='Full Fitted Model', color='red', linewidth=2)
-            
-            # Add linear trend line (rx + C)
-            linear_trend = r_opt * x_data_normalized + C_opt
-            linear_trend_sorted = linear_trend[sort_indices]
-            plt.plot(x_sorted, linear_trend_sorted, '--', color='green', linewidth=2, alpha=0.8, label='Linear Trend (rx+C)')
-            
-            plt.xlabel('Normalized External Magnetic Flux (Φ_ext)', fontsize=14)
-            plt.ylabel('Normalized Supercurrent (I_s)', fontsize=14)
-            plt.title('Supercurrent vs. Normalized External Magnetic Flux', fontsize=16)
-            plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
-            plt.grid()
+                # Sort data by x_data_normalized for proper line connection
+                sort_indices = np.argsort(x_data_normalized)
+                x_sorted = x_data_normalized[sort_indices]
+                y_sorted = y_data_normalized[sort_indices]
+                fitted_y_sorted = fitted_y_data[sort_indices]
+                
+                # Plot original data with dashed line connection
+                plt.plot(x_sorted, y_sorted, '--', color='blue', linewidth=1, alpha=0.7, label=f'{dataid} (connected)')
+                plt.scatter(x_data_normalized, y_data_normalized, color='blue', s=8, alpha=0.8, zorder=5)
+                
+                # Plot fitted curve
+                plt.plot(x_sorted, fitted_y_sorted, label='Full Fitted Model', color='red', linewidth=2)
+                
+                # Add linear trend line (rx + C)
+                linear_trend = r_opt * x_data_normalized + C_opt
+                linear_trend_sorted = linear_trend[sort_indices]
+                plt.plot(x_sorted, linear_trend_sorted, '--', color='green', linewidth=2, alpha=0.8, label='Linear Trend (rx+C)')
+                
+                plt.xlabel('Normalized External Magnetic Flux (Φ_ext)', fontsize=14)
+                plt.ylabel('Normalized Supercurrent (I_s)', fontsize=14)
+                plt.title('Supercurrent vs. Normalized External Magnetic Flux', fontsize=16)
+                plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
+                plt.grid()
 
-            # Add text box with optimized parameters and statistics
-            param_text = f'Optimized Parameters:\nI_c: {I_c_opt:.2e}\nphi_0: {phi_0_opt:.2f}\nf: {f_opt:.2e}\nT: {T_opt:.2%}\nr: {r_opt:.2e}\nC: {C_opt:.2e}'
-            stats_text = f'Statistical Metrics:\nR²: {r_squared:.4f}\nAdj. R²: {adj_r_squared:.4f}\nRMSE: {rmse:.4f}\nSSE: {ss_res:.4f}\nMAE: {mae:.4f}'
-            plt.text(1.02, 0.50, param_text, transform=plt.gca().transAxes, fontsize=10, 
-                     verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            plt.text(1.02, 0.25, stats_text, transform=plt.gca().transAxes, fontsize=10, 
-                     verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+                # Add text box with optimized parameters and statistics
+                param_text = f'Optimized Parameters:\nI_c: {I_c_opt:.2e}\nphi_0: {phi_0_opt:.2f}\nf: {f_opt:.2e}\nT: {T_opt:.2%}\nr: {r_opt:.2e}\nC: {C_opt:.2e}'
+                stats_text = f'Statistical Metrics:\nR²: {r_squared:.4f}\nAdj. R²: {adj_r_squared:.4f}\nRMSE: {rmse:.4f}\nSSE: {ss_res:.4f}\nMAE: {mae:.4f}'
+                plt.text(1.02, 0.50, param_text, transform=plt.gca().transAxes, fontsize=10, 
+                         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                plt.text(1.02, 0.25, stats_text, transform=plt.gca().transAxes, fontsize=10, 
+                         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
 
-            plt.tight_layout()
-            plt.savefig(f'{output_dir}/{dataid}_fitted_curve_normalized_plot.png', dpi=PLOT_DPI, bbox_inches='tight')
-            plt.close()
+                plt.subplots_adjust(left=0.08, right=0.75, top=0.92, bottom=0.08)
+                plt.savefig(f'{output_dir}/{dataid}_fitted_curve_normalized_plot.png', dpi=PLOT_DPI)
+                plt.close()
 
             # 2. Plot the original data(unnormalized) and the fitted curve
             # Create a copy of optimized parameters for scaling
@@ -654,48 +688,50 @@ class EnhancedJosephsonProcessor:
             # Scale C back to original units
             C_scaled = C_opt * y_factor + min(y_data)
 
-            plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI)
-            fitted_y_original = model_f_numba(x_data_normalized, I_c_opt, phi_0_opt, f_opt, T_opt, r_opt, C_opt)*y_factor + min(y_data)
+            with self.matplotlib_lock:  # Thread-safe matplotlib operations
+                plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI)
+                
+                fitted_y_original = model_f_numba(x_data_normalized, I_c_opt, phi_0_opt, f_opt, T_opt, r_opt, C_opt)*y_factor + min(y_data)
 
-            # Fast statistical calculations for original scale data using numba
-            r_squared_original, adj_r_squared_original, rmse_original, mae_original, ss_res_original, _, _ = calculate_statistics_numba(
-                y_data, fitted_y_original, len(popt))
+                # Fast statistical calculations for original scale data using numba
+                r_squared_original, adj_r_squared_original, rmse_original, mae_original, ss_res_original, _, _ = calculate_statistics_numba(
+                    y_data, fitted_y_original, len(popt))
 
-            # Sort data by x_data for proper line connection
-            sort_indices = np.argsort(x_data)
-            x_sorted = x_data[sort_indices]
-            y_sorted = y_data[sort_indices]
-            fitted_y_sorted = fitted_y_original[sort_indices]
-            
-            # Plot original data with dashed line connection
-            plt.plot(x_sorted, y_sorted, '--', color='blue', linewidth=1, alpha=0.7, label=f'{dataid} (connected)')
-            plt.scatter(x_data, y_data, color='blue', s=8, alpha=0.8, zorder=5)
-            
-            # Plot fitted curve
-            plt.plot(x_sorted, fitted_y_sorted, label='Full Fitted Model', color='red', linewidth=2)
-            
-            # Add linear trend line (rx + C) in original scale
-            linear_trend_original = r_scaled * x_data + C_scaled 
-            linear_trend_sorted = linear_trend_original[sort_indices]
-            plt.plot(x_sorted, linear_trend_sorted, '--', color='green', linewidth=2, alpha=0.8, label='Linear Trend (rx+C)')
-            
-            plt.xlabel('External Magnetic Flux (Φ_ext)', fontsize=14)
-            plt.ylabel('Supercurrent (I_s)', fontsize=14)
-            plt.title('Supercurrent vs. External Magnetic Flux', fontsize=16)
-            plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
-            plt.grid()
+                # Sort data by x_data for proper line connection
+                sort_indices = np.argsort(x_data)
+                x_sorted = x_data[sort_indices]
+                y_sorted = y_data[sort_indices]
+                fitted_y_sorted = fitted_y_original[sort_indices]
+                
+                # Plot original data with dashed line connection
+                plt.plot(x_sorted, y_sorted, '--', color='blue', linewidth=1, alpha=0.7, label=f'{dataid} (connected)')
+                plt.scatter(x_data, y_data, color='blue', s=8, alpha=0.8, zorder=5)
+                
+                # Plot fitted curve
+                plt.plot(x_sorted, fitted_y_sorted, label='Full Fitted Model', color='red', linewidth=2)
+                
+                # Add linear trend line (rx + C) in original scale
+                linear_trend_original = r_scaled * x_data + C_scaled 
+                linear_trend_sorted = linear_trend_original[sort_indices]
+                plt.plot(x_sorted, linear_trend_sorted, '--', color='green', linewidth=2, alpha=0.8, label='Linear Trend (rx+C)')
+                
+                plt.xlabel('External Magnetic Flux (Φ_ext)', fontsize=14)
+                plt.ylabel('Supercurrent (I_s)', fontsize=14)
+                plt.title('Supercurrent vs. External Magnetic Flux', fontsize=16)
+                plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
+                plt.grid()
 
-            # Add text box with scaled parameters and statistics
-            scaled_param_text = f'Scaled Parameters:\nI_c: {I_c_scaled:.2e}\nphi_0: {phi_0_scaled:.2f}\nf: {f_scaled:.2e}\nT: {T_scaled:.2%}\nr: {r_scaled:.2e}\nC: {C_scaled:.2e}'
-            original_stats_text = f'Statistical Metrics:\nR²: {r_squared_original:.4f}\nAdj. R²: {adj_r_squared_original:.4f}\nRMSE: {rmse_original:.4f}\nSSE: {ss_res_original:.4f}\nMAE: {mae_original:.4f}'
-            plt.text(1.02, 0.50, scaled_param_text, transform=plt.gca().transAxes, fontsize=10, 
-                     verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            plt.text(1.02, 0.25, original_stats_text, transform=plt.gca().transAxes, fontsize=10, 
-                     verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+                # Add text box with scaled parameters and statistics
+                scaled_param_text = f'Scaled Parameters:\nI_c: {I_c_scaled:.2e}\nphi_0: {phi_0_scaled:.2f}\nf: {f_scaled:.2e}\nT: {T_scaled:.2%}\nr: {r_scaled:.2e}\nC: {C_scaled:.2e}'
+                original_stats_text = f'Statistical Metrics:\nR²: {r_squared_original:.4f}\nAdj. R²: {adj_r_squared_original:.4f}\nRMSE: {rmse_original:.4f}\nSSE: {ss_res_original:.4f}\nMAE: {mae_original:.4f}'
+                plt.text(1.02, 0.50, scaled_param_text, transform=plt.gca().transAxes, fontsize=10, 
+                         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                plt.text(1.02, 0.25, original_stats_text, transform=plt.gca().transAxes, fontsize=10, 
+                         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
 
-            plt.tight_layout()
-            plt.savefig(f'{output_dir}/{dataid}_fitted_curve_plot.png', dpi=PLOT_DPI, bbox_inches='tight')
-            plt.close()
+                plt.subplots_adjust(left=0.08, right=0.75, top=0.92, bottom=0.08) 
+                plt.savefig(f'{output_dir}/{dataid}_fitted_curve_plot.png', dpi=PLOT_DPI)
+                plt.close()
 
             # Update parameters for later use
             I_c_opt = I_c_scaled
@@ -707,50 +743,51 @@ class EnhancedJosephsonProcessor:
 
             # 3. Residuals plot and their statistics
             residuals = y_data - fitted_y_original
-            plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI)
+            with self.matplotlib_lock:  # Thread-safe matplotlib operations
+                plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI)
 
-            # Main residuals plot
-            plt.subplot(2, 2, 1)
-            plt.scatter(x_data, residuals, label=f'{dataid} Residuals', color='green', s=5)
-            plt.axhline(0, color='black', linestyle='--', linewidth=0.8)
-            plt.xlabel('External Magnetic Flux', fontsize=12)
-            plt.ylabel('Residuals', fontsize=12)
-            plt.title('Residuals of the Fit', fontsize=14)
-            plt.legend()
-            plt.grid()
+                # Main residuals plot
+                plt.subplot(2, 2, 1)
+                plt.scatter(x_data, residuals, label=f'{dataid} Residuals', color='green', s=5)
+                plt.axhline(0, color='black', linestyle='--', linewidth=0.8)
+                plt.xlabel('External Magnetic Flux', fontsize=12)
+                plt.ylabel('Residuals', fontsize=12)
+                plt.title('Residuals of the Fit', fontsize=14)
+                plt.legend()
+                plt.grid()
 
-            # Residuals vs fitted values
-            plt.subplot(2, 2, 2)
-            plt.scatter(fitted_y_original, residuals, alpha=0.6, s=5, color='orange')
-            plt.axhline(y=0, color='red', linestyle='--')
-            plt.xlabel('Fitted Values', fontsize=12)
-            plt.ylabel('Residuals', fontsize=12)
-            plt.title('Residuals vs Fitted Values', fontsize=14)
-            plt.grid()
+                # Residuals vs fitted values
+                plt.subplot(2, 2, 2)
+                plt.scatter(fitted_y_original, residuals, alpha=0.6, s=5, color='orange')
+                plt.axhline(y=0, color='red', linestyle='--')
+                plt.xlabel('Fitted Values', fontsize=12)
+                plt.ylabel('Residuals', fontsize=12)
+                plt.title('Residuals vs Fitted Values', fontsize=14)
+                plt.grid()
 
-            # Q-Q plot of residuals
-            plt.subplot(2, 2, 3)
-            stats.probplot(residuals, dist="norm", plot=plt)
-            plt.title('Q-Q Plot of Residuals', fontsize=14)
-            plt.grid()
+                # Q-Q plot of residuals
+                plt.subplot(2, 2, 3)
+                stats.probplot(residuals, dist="norm", plot=plt)
+                plt.title('Q-Q Plot of Residuals', fontsize=14)
+                plt.grid()
 
-            # Histogram of residuals
-            plt.subplot(2, 2, 4)
-            plt.hist(residuals, bins=30, alpha=0.7, density=True, edgecolor='black', color='lightcoral')
-            plt.xlabel('Residuals', fontsize=12)
-            plt.ylabel('Density', fontsize=12)
-            plt.title('Distribution of Residuals', fontsize=14)
-            plt.grid()
+                # Histogram of residuals
+                plt.subplot(2, 2, 4)
+                plt.hist(residuals, bins=30, alpha=0.7, density=True, edgecolor='black', color='lightcoral')
+                plt.xlabel('Residuals', fontsize=12)
+                plt.ylabel('Density', fontsize=12)
+                plt.title('Distribution of Residuals', fontsize=14)
+                plt.grid()
 
-            # Overlay normal distribution
-            x_normal = np.linspace(residuals.min(), residuals.max(), 100)
-            y_normal = stats.norm.pdf(x_normal, np.mean(residuals), np.std(residuals))
-            plt.plot(x_normal, y_normal, 'r-', label='Normal Distribution', linewidth=2)
-            plt.legend()
+                # Overlay normal distribution
+                x_normal = np.linspace(residuals.min(), residuals.max(), 100)
+                y_normal = stats.norm.pdf(x_normal, np.mean(residuals), np.std(residuals))
+                plt.plot(x_normal, y_normal, 'r-', label='Normal Distribution', linewidth=2)
+                plt.legend()
 
-            plt.tight_layout()
-            plt.savefig(f'{output_dir}/{dataid}_residuals_plot.png', dpi=PLOT_DPI, bbox_inches='tight')
-            plt.close()
+                plt.tight_layout(pad=0)
+                plt.savefig(f'{output_dir}/{dataid}_residuals_plot.png', dpi=PLOT_DPI, bbox_inches='tight', pad_inches=0)
+                plt.close()
 
             # 4. & 5. Add matplotlib phase-folded plots (colored by cycle with lines)
             if len(top_frequencies) > 0:
@@ -762,115 +799,117 @@ class EnhancedJosephsonProcessor:
                     phase, cycle_number, total_cycles = calculate_phase_data_numba(x_data_normalized, best_frequency)
                     
                     # 4. Create matplotlib figure for phase-folded plot with drift analysis
-                    plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI)
+                    with self.matplotlib_lock:  # Thread-safe matplotlib operations
+                        plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI)
                     
-                    # Define color list
-                    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
-                    
-                    # Store peak information for phase drift analysis
-                    cycle_peak_phases = []
-                    cycle_peak_values = []
-                    
-                    # Group by cycle and plot data points with different colors, including lines
-                    for cycle in range(total_cycles):
-                        mask = cycle_number == cycle
-                        if np.any(mask):
-                            color = colors[cycle % len(colors)]
-                            
-                            # Get data for this cycle and sort by phase
-                            cycle_phase = phase[mask]
-                            cycle_y = y_data_normalized[mask]
-                            
-                            # Find peak position for this cycle (for drift analysis)
-                            max_idx = np.argmax(cycle_y)
-                            peak_phase = cycle_phase[max_idx]
-                            peak_value = cycle_y[max_idx]
-                            cycle_peak_phases.append(peak_phase)
-                            cycle_peak_values.append(peak_value)
-                            
-                            # Sort by phase for correct line connection
-                            sort_indices = np.argsort(cycle_phase)
-                            sorted_phase = cycle_phase[sort_indices]
-                            sorted_y = cycle_y[sort_indices]
-                            
-                            # Plot connected data points
-                            plt.plot(sorted_phase, sorted_y, 'o-', color=color, 
-                                    label=f'Cycle {cycle + 1}', markersize=4, linewidth=2, alpha=0.8)
-                            
-                            # Add peak marker for phase drift analysis
-                            plt.scatter([peak_phase], [peak_value], color=color, s=120, 
-                                       marker='*', edgecolors='black', linewidth=2, zorder=5)
-                    
-                    # Fast binned average calculation using numba
-                    bin_centers, mean_binned_values = calculate_binned_average_numba(phase, y_data_normalized)
-                    
-                    # Remove NaN values and ensure sorting by x order
-                    valid_mask = ~np.isnan(mean_binned_values)
-                    if np.any(valid_mask):
-                        valid_centers = bin_centers[valid_mask]
-                        valid_means = mean_binned_values[valid_mask]
+                        # Define color list
+                        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
                         
-                        # Sort by x-axis (phase) order
-                        sort_indices = np.argsort(valid_centers)
-                        sorted_centers = valid_centers[sort_indices]
-                        sorted_means = valid_means[sort_indices]
+                        # Store peak information for phase drift analysis
+                        cycle_peak_phases = []
+                        cycle_peak_values = []
                         
-                        # Create single cycle average line, connected by x order
-                        plt.plot(sorted_centers, sorted_means, 'k--', linewidth=3, 
-                                label='Average Profile', marker='s', markersize=6)
-                    
-                    plt.xlabel(f'Phase (Period = {best_period:.6f})', fontsize=14)
-                    plt.ylabel('Normalized Supercurrent (I_s)', fontsize=14)
-                    plt.title(f'Phase-Folded Plot with Phase Drift Analysis - Total {total_cycles} Cycles', fontsize=16)
-                    plt.xlim(0, 1)
-                    plt.grid(True, alpha=0.3)
-                    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-                    
-                    # Add statistics info text box
-                    info_text = f'Best Frequency: {best_frequency:.6e} Hz\nPeriod: {best_period:.6f}\nTotal Cycles: {total_cycles}'
-                    plt.text(1.02, 0.50, info_text, transform=plt.gca().transAxes, fontsize=10,
-                            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
-                    
-                    # Calculate and display phase drift statistics
-                    if len(cycle_peak_phases) > 1:
-                        phase_drift = np.diff(cycle_peak_phases)
-                        # Handle phase crossing 0-1 boundary
-                        phase_drift = np.where(phase_drift > 0.5, phase_drift - 1, phase_drift)
-                        phase_drift = np.where(phase_drift < -0.5, phase_drift + 1, phase_drift)
+                        # Group by cycle and plot data points with different colors, including lines
+                        for cycle in range(total_cycles):
+                            mask = cycle_number == cycle
+                            if np.any(mask):
+                                color = colors[cycle % len(colors)]
+                                
+                                # Get data for this cycle and sort by phase
+                                cycle_phase = phase[mask]
+                                cycle_y = y_data_normalized[mask]
+                                
+                                # Find peak position for this cycle (for drift analysis)
+                                max_idx = np.argmax(cycle_y)
+                                peak_phase = cycle_phase[max_idx]
+                                peak_value = cycle_y[max_idx]
+                                cycle_peak_phases.append(peak_phase)
+                                cycle_peak_values.append(peak_value)
+                                
+                                # Sort by phase for correct line connection
+                                sort_indices = np.argsort(cycle_phase)
+                                sorted_phase = cycle_phase[sort_indices]
+                                sorted_y = cycle_y[sort_indices]
+                                
+                                # Plot connected data points
+                                plt.plot(sorted_phase, sorted_y, 'o-', color=color, 
+                                        label=f'Cycle {cycle + 1}', markersize=4, linewidth=2, alpha=0.8)
+                                
+                                # Add peak marker for phase drift analysis
+                                plt.scatter([peak_phase], [peak_value], color=color, s=120, 
+                                           marker='*', edgecolors='black', linewidth=2, zorder=5)
                         
-                        drift_stats = f'Phase Drift Statistics:\nMean Drift: {np.mean(phase_drift):.6f}\nStd Dev: {np.std(phase_drift):.6f}\n★ = Peak positions'
-                        plt.text(1.02, 0.25, drift_stats, transform=plt.gca().transAxes, fontsize=10,
-                                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
-                    
-                    plt.tight_layout()
-                    plt.savefig(f'{output_dir}/{dataid}_phase_folded_with_drift.png', dpi=PLOT_DPI, bbox_inches='tight')
-                    plt.close()
+                        # Fast binned average calculation using numba
+                        bin_centers, mean_binned_values = calculate_binned_average_numba(phase, y_data_normalized)
+                        
+                        # Remove NaN values and ensure sorting by x order
+                        valid_mask = ~np.isnan(mean_binned_values)
+                        if np.any(valid_mask):
+                            valid_centers = bin_centers[valid_mask]
+                            valid_means = mean_binned_values[valid_mask]
+                            
+                            # Sort by x-axis (phase) order
+                            sort_indices = np.argsort(valid_centers)
+                            sorted_centers = valid_centers[sort_indices]
+                            sorted_means = valid_means[sort_indices]
+                            
+                            # Create single cycle average line, connected by x order
+                            plt.plot(sorted_centers, sorted_means, 'k--', linewidth=3, 
+                                    label='Average Profile', marker='s', markersize=6)
+                        
+                        plt.xlabel(f'Phase (Period = {best_period:.6f})', fontsize=14)
+                        plt.ylabel('Normalized Supercurrent (I_s)', fontsize=14)
+                        plt.title(f'Phase-Folded Plot with Phase Drift Analysis - Total {total_cycles} Cycles', fontsize=16)
+                        plt.xlim(0, 1)
+                        plt.grid(True, alpha=0.3)
+                        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                        
+                        # Add statistics info text box
+                        info_text = f'Best Frequency: {best_frequency:.6e} Hz\nPeriod: {best_period:.6f}\nTotal Cycles: {total_cycles}'
+                        plt.text(1.02, 0.50, info_text, transform=plt.gca().transAxes, fontsize=10,
+                                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
+                        
+                        # Calculate and display phase drift statistics
+                        if len(cycle_peak_phases) > 1:
+                            phase_drift = np.diff(cycle_peak_phases)
+                            # Handle phase crossing 0-1 boundary
+                            phase_drift = np.where(phase_drift > 0.5, phase_drift - 1, phase_drift)
+                            phase_drift = np.where(phase_drift < -0.5, phase_drift + 1, phase_drift)
+                            
+                            drift_stats = f'Phase Drift Statistics:\nMean Drift: {np.mean(phase_drift):.6f}\nStd Dev: {np.std(phase_drift):.6f}\n★ = Peak positions'
+                            plt.text(1.02, 0.25, drift_stats, transform=plt.gca().transAxes, fontsize=10,
+                                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+                        
+                        plt.subplots_adjust(left=0.08, right=0.75, top=0.92, bottom=0.08)
+                        plt.savefig(f'{output_dir}/{dataid}_phase_folded_with_drift.png', dpi=PLOT_DPI)
+                        plt.close()
                     
                     # 5. Plot original data colored by cycle (without phase folding)
-                    plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI)
+                    with self.matplotlib_lock:  # Thread-safe matplotlib operations
+                        plt.figure(figsize=PLOT_SIZE, dpi=PLOT_DPI)
                     
-                    for cycle in range(total_cycles):
-                        mask = cycle_number == cycle
-                        if np.any(mask):
-                            color = colors[cycle % len(colors)]
-                            plt.scatter(x_data_normalized[mask], y_data_normalized[mask],
-                                       color=color, label=f'Cycle {cycle + 1}', s=20, alpha=0.8)
-                    
-                    plt.xlabel('Normalized External Magnetic Flux (Φ_ext)', fontsize=14)
-                    plt.ylabel('Normalized Supercurrent (I_s)', fontsize=14)
-                    plt.title(f'Original Data Colored by Cycle (Total {total_cycles} Cycles)', fontsize=16)
-                    plt.grid(True, alpha=0.3)
-                    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-                    
-                    # Add cycle boundary lines
-                    for cycle in range(1, total_cycles):
-                        boundary = cycle / best_frequency
-                        if boundary <= np.max(x_data_normalized):
-                            plt.axvline(x=boundary, color='gray', linestyle=':', alpha=0.7, linewidth=1)
-                    
-                    plt.tight_layout()
-                    plt.savefig(f'{output_dir}/{dataid}_cycles_colored_matplotlib.png', dpi=PLOT_DPI, bbox_inches='tight')
-                    plt.close()
+                        for cycle in range(total_cycles):
+                            mask = cycle_number == cycle
+                            if np.any(mask):
+                                color = colors[cycle % len(colors)]
+                                plt.scatter(x_data_normalized[mask], y_data_normalized[mask],
+                                           color=color, label=f'Cycle {cycle + 1}', s=20, alpha=0.8)
+                        
+                        plt.xlabel('Normalized External Magnetic Flux (Φ_ext)', fontsize=14)
+                        plt.ylabel('Normalized Supercurrent (I_s)', fontsize=14)
+                        plt.title(f'Original Data Colored by Cycle (Total {total_cycles} Cycles)', fontsize=16)
+                        plt.grid(True, alpha=0.3)
+                        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                        
+                        # Add cycle boundary lines
+                        for cycle in range(1, total_cycles):
+                            boundary = cycle / best_frequency
+                            if boundary <= np.max(x_data_normalized):
+                                plt.axvline(x=boundary, color='gray', linestyle=':', alpha=0.7, linewidth=1)
+                        
+                        plt.subplots_adjust(left=0.08, right=0.92, top=0.92, bottom=0.08)
+                        plt.savefig(f'{output_dir}/{dataid}_cycles_colored_matplotlib.png', dpi=PLOT_DPI)
+                        plt.close()
 
             # Return analysis results
             return {
@@ -897,6 +936,110 @@ class EnhancedJosephsonProcessor:
                 'success': False,
                 'error': str(e)
             }
+
+    def process_files(self, csv_files, output_dir=None):
+        """Process a specific list of CSV files using multithreading
+        
+        Args:
+            csv_files: List of CSV file paths to process
+            output_dir: Output directory (optional, uses config default if not provided)
+            
+        Returns:
+            List of processing results
+        """
+        if output_dir is None:
+            output_dir = self.config.get('OUTPUT_FOLDER', 'output')
+        
+        if not csv_files:
+            self.safe_print("No CSV files provided to process")
+            return []
+        
+        self.safe_print(f"Processing {len(csv_files)} CSV files")
+        self.safe_print(f"Using {MAX_WORKERS} worker threads for parallel processing")
+        
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Record start time
+        start_time = time.time()
+        
+        # Initialize results list and progress counter
+        results = []
+        successful_count = 0
+        failed_count = 0
+        self.progress_counter['total'] = len(csv_files)
+        self.progress_counter['current'] = 0
+        
+        # Process files in parallel using ThreadPoolExecutor
+        try:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                self.safe_print(f"{'='*60}")
+                self.safe_print("STARTING PARALLEL PROCESSING")
+                self.safe_print(f"{'='*60}")
+                
+                # Submit all jobs
+                future_to_file = {executor.submit(self.process_single_file, csv_file, output_dir): csv_file 
+                                 for csv_file in csv_files}
+                
+                # Process completed jobs
+                for future in as_completed(future_to_file):
+                    csv_file = future_to_file[future]
+                    try:
+                        result = future.result(timeout=300)  # 5 minute timeout per file
+                        results.append(result)
+                        
+                        if result['success']:
+                            successful_count += 1
+                            self.update_progress(result['dataid'], True)
+                        else:
+                            failed_count += 1
+                            self.update_progress(result['dataid'], False, result.get('error'))
+                            
+                    except Exception as e:
+                        failed_count += 1
+                        dataid = Path(csv_file).stem
+                        error_msg = str(e)[:50] + "..." if len(str(e)) > 50 else str(e)
+                        self.update_progress(dataid, False, f"Exception: {error_msg}")
+                        results.append({
+                            'dataid': dataid,
+                            'success': False,
+                            'error': str(e)
+                        })
+        
+        except Exception as e:
+            self.safe_print(f"Critical error in file processing: {str(e)}")
+            return results
+        
+        # Calculate processing time
+        end_time = time.time()
+        processing_time = end_time - start_time
+        
+        # Create summary report
+        self.safe_print(f"{'='*60}")
+        self.safe_print("FILE PROCESSING SUMMARY")
+        self.safe_print(f"{'='*60}")
+        self.safe_print(f"Total files processed: {len(csv_files)}")
+        self.safe_print(f"Successful: {successful_count}")
+        self.safe_print(f"Failed: {failed_count}")
+        if len(csv_files) > 0:
+            self.safe_print(f"Success rate: {successful_count/len(csv_files)*100:.1f}%")
+            self.safe_print(f"Total processing time: {processing_time:.2f} seconds")
+            self.safe_print(f"Average time per file: {processing_time/len(csv_files):.2f} seconds")
+        self.safe_print(f"Speedup factor (estimated): {MAX_WORKERS:.1f}x with {MAX_WORKERS} threads")
+        
+        # Save results to CSV if any results exist
+        if results:
+            try:
+                summary_df = pd.DataFrame(results)
+                summary_path = os.path.join(output_dir, 'analysis_summary.csv')
+                summary_df.to_csv(summary_path, index=False)
+                self.safe_print(f"Summary saved to: {summary_path}")
+            except Exception as e:
+                self.safe_print(f"Error saving summary: {str(e)}")
+        
+        self.safe_print(f"All plots saved to: {output_dir}")
+        
+        return results
 
     def batch_process_files(self):
         """Process all CSV files in the input folder using multithreading"""
@@ -1012,6 +1155,29 @@ class EnhancedJosephsonProcessor:
         self.safe_print("✓ Fast statistical calculations")
         self.safe_print("✓ Thread-safe output management")
         self.safe_print(f"✓ High-resolution plots ({PLOT_SIZE[0]}x{PLOT_SIZE[1]} inches at {PLOT_DPI} DPI)")
+
+    def safe_matplotlib_operation(self, func, *args, **kwargs):
+        """Thread-safe wrapper for matplotlib operations to prevent conflicts"""
+        with self.matplotlib_lock:
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                self.logger.logger.error(f"Matplotlib operation failed: {e}")
+                raise
+    
+    def create_plot_safely(self, plot_func, filename, *args, **kwargs):
+        """Safely create and save a plot with thread protection"""
+        def _plot_operation():
+            try:
+                result = plot_func(*args, **kwargs)
+                plt.savefig(filename, dpi=PLOT_DPI)
+                plt.close()
+                return result
+            except Exception as e:
+                plt.close()  # Ensure cleanup even if error occurs
+                raise e
+        
+        return self.safe_matplotlib_operation(_plot_operation)
 
 def main():
     """Main entry point for command line usage"""

@@ -1,8 +1,8 @@
 {
   "INPUT_FOLDER": "data/Ic",
-  "OUTPUT_FOLDER": "output",
-  "SUMMARY_FILE": "analysis_summary.csv",
-  "LOG_FILE": "processing.log",
+  "OUTPUT_FOLDER": "output/images",
+  "SUMMARY_FILE": "output/data/analysis_summary.csv",
+  "LOG_FILE": "logs/processing.log",
   "MAX_WORKERS": 8,
   "MEMORY_THRESHOLD": 85,
   "TIMEOUT_PER_FILE": 300,

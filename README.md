@@ -142,13 +142,31 @@ y_field,Ic
 
 ```
 CPR/
-├── README.md                    # This file
-├── requirements.txt             # Python dependencies
-├── requirements-dev.txt         # Development dependencies
-├── config.json                  # Default configuration
-├── setup.py                     # Package setup (legacy)
-├── pyproject.toml              # Modern Python project configuration
-├── Makefile                     # Development automation
+├── 📁 src/                     # Source code
+│   └── cpr/                    # Core CPR processing package
+├── 📁 tests/                   # Organized test suite
+│   ├── unit/                   # Unit tests
+│   ├── integration/            # Integration tests
+│   └── performance/            # Performance tests
+├── 📁 config/                  # Configuration files
+├── 📁 logs/                    # Log files
+├── 📁 output/                  # Processing outputs
+│   ├── images/                 # Generated visualizations
+│   ├── benchmark/              # Benchmark outputs
+│   └── test/                   # Test outputs
+├── 📁 debug/                   # Debug tools and outputs
+├── 📁 data/                    # Input data files
+│   └── Ic/                     # Critical current CSV files
+├── 📁 docs/                    # Documentation
+├── 📁 examples/                # Example usage
+├── 📁 scripts/                 # Utility scripts
+├── README.md                   # This file
+├── requirements.txt            # Python dependencies
+├── requirements-dev.txt        # Development dependencies
+├── setup.py                    # Package setup
+├── pyproject.toml             # Modern Python project configuration
+├── Makefile                   # Development automation
+└── PROJECT_STRUCTURE.md       # Detailed structure documentation
 ├── run_analysis.py             # Main entry point
 ├── .gitignore                   # Git ignore patterns
 ├── LICENSE                      # MIT License

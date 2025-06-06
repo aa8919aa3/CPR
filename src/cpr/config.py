@@ -50,7 +50,7 @@ class Config:
         'FILE_LOG': True,
     }
 
-    def __init__(self, config_file: str = 'config.json'):
+    def __init__(self, config_file: str = 'config/config.json'):
         self.config_file = Path(config_file)
         self.config = self.DEFAULT_CONFIG.copy()
         self._load_config()
