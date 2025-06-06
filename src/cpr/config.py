@@ -30,9 +30,9 @@ class Config:
         'FAST_MODE': False,
         
         # Visualization settings
-        'DPI_HIGH': 300,
-        'DPI_FAST': 150,
-        'FIGURE_SIZE': (12, 8),
+        'DPI_HIGH': 100,  # Changed for 1920x1080 output
+        'DPI_FAST': 100,  # Consistent DPI
+        'FIGURE_SIZE': (19.2, 10.8),  # 1920x1080 at 100 DPI
         'SAVE_PLOTS': True,
         'PLOT_FORMATS': ['png'],  # ['png', 'pdf', 'svg']
         

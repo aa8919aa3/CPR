@@ -1,16 +1,31 @@
 """
-Enhanced main processor with all optimizations
+OPTIMIZED VERSION with numba, multithreading, LRU cache, and FireDucks pandas
+Enhanced main processor with all optimizations including advanced visualization
 """
 import os
 import sys
 import glob
 import time
 import threading
+import multiprocessing
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any
 import numpy as np
 import traceback
+from functools import lru_cache
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
+
+# Import optimization libraries
+try:
+    import numba
+    from numba import jit, prange
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
 
 # Try to import optimized pandas, fallback to standard pandas
 try:
@@ -20,12 +35,142 @@ except ImportError:
     import pandas as pd
     USING_FIREDUCKS = False
 
+# Import visualization libraries
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for multithreading
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+from scipy import stats
+from scipy.optimize import curve_fit
+from astropy.timeseries import LombScargle
+
 from .config import config
 from .logger import init_logger
 from .josephson_model import JosephsonFitter, preprocess_data_numba
 from .analysis_utils import FrequencyAnalyzer, PhaseAnalyzer, validate_data
 from .visualization import PublicationPlotter
 from .memory_manager import AdaptiveProcessor
+
+# Numba-optimized model function
+if HAS_NUMBA:
+    @jit(nopython=True, cache=True, fastmath=True)
+    def model_f_numba(Phi_ext, I_c, phi_0, f, T, r, C):
+        """Numba-optimized Josephson junction model function"""
+        main_phase = 2 * np.pi * f * Phi_ext - phi_0
+        half_phase = main_phase / 2
+        sin_half = np.sin(half_phase)
+        sin_main = np.sin(main_phase)
+        # Calculate denominator (add numerical stability protection)
+        denominator_term = 1 - T * sin_half**2
+        denominator_term = np.maximum(denominator_term, 1e-12)  # Prevent division by zero
+        denominator = np.sqrt(denominator_term)
+        return I_c * sin_main / denominator + r * Phi_ext + C
+
+    @jit(nopython=True, cache=True, fastmath=True)
+    def calculate_statistics_numba(y_data, fitted_data, n_params):
+        """Fast statistical calculations using numba"""
+        n = len(y_data)
+        y_mean = np.mean(y_data)
+        
+        # Calculate sum of squares
+        ss_res = np.sum((y_data - fitted_data) ** 2)
+        ss_tot = np.sum((y_data - y_mean) ** 2)
+        
+        # R-squared and adjusted R-squared
+        r_squared = 1 - (ss_res / ss_tot)
+        adj_r_squared = 1 - (1 - r_squared) * (n - 1) / (n - n_params - 1)
+        
+        # RMSE and MAE
+        rmse = np.sqrt(ss_res / n)
+        mae = np.mean(np.abs(y_data - fitted_data))
+        
+        # Residual statistics
+        residuals = y_data - fitted_data
+        residual_mean = np.mean(residuals)
+        residual_std = np.std(residuals)
+        
+        return r_squared, adj_r_squared, rmse, mae, ss_res, residual_mean, residual_std
+
+    @jit(nopython=True, cache=True, fastmath=True)
+    def calculate_phase_data_numba(x_data_normalized, best_frequency):
+        """Fast phase calculations using numba"""
+        phase = (x_data_normalized * best_frequency) % 1.0
+        cycle_number = np.floor(x_data_normalized * best_frequency).astype(np.int32)
+        total_cycles = int(np.max(cycle_number)) + 1
+        return phase, cycle_number, total_cycles
+
+    @jit(nopython=True, cache=True, fastmath=True)
+    def calculate_binned_average_numba(phase, y_data_normalized, num_bins=20):
+        """Fast binned average calculation using numba"""
+        phase_bins = np.linspace(0, 1, num_bins + 1)
+        bin_centers = (phase_bins[:-1] + phase_bins[1:]) / 2
+        mean_binned_values = np.full(num_bins, np.nan)
+        
+        for i in range(num_bins):
+            mask = (phase >= phase_bins[i]) & (phase < phase_bins[i+1])
+            if np.any(mask):
+                mean_binned_values[i] = np.mean(y_data_normalized[mask])
+        
+        return bin_centers, mean_binned_values
+else:
+    # Fallback implementations without numba
+    def model_f_numba(Phi_ext, I_c, phi_0, f, T, r, C):
+        main_phase = 2 * np.pi * f * Phi_ext - phi_0
+        half_phase = main_phase / 2
+        sin_half = np.sin(half_phase)
+        sin_main = np.sin(main_phase)
+        denominator_term = 1 - T * sin_half**2
+        denominator_term = np.maximum(denominator_term, 1e-12)
+        denominator = np.sqrt(denominator_term)
+        return I_c * sin_main / denominator + r * Phi_ext + C
+    
+    def calculate_statistics_numba(y_data, fitted_data, n_params):
+        n = len(y_data)
+        y_mean = np.mean(y_data)
+        ss_res = np.sum((y_data - fitted_data) ** 2)
+        ss_tot = np.sum((y_data - y_mean) ** 2)
+        r_squared = 1 - (ss_res / ss_tot)
+        adj_r_squared = 1 - (1 - r_squared) * (n - 1) / (n - n_params - 1)
+        rmse = np.sqrt(ss_res / n)
+        mae = np.mean(np.abs(y_data - fitted_data))
+        residuals = y_data - fitted_data
+        residual_mean = np.mean(residuals)
+        residual_std = np.std(residuals)
+        return r_squared, adj_r_squared, rmse, mae, ss_res, residual_mean, residual_std
+    
+    def calculate_phase_data_numba(x_data_normalized, best_frequency):
+        phase = (x_data_normalized * best_frequency) % 1.0
+        cycle_number = np.floor(x_data_normalized * best_frequency).astype(np.int32)
+        total_cycles = int(np.max(cycle_number)) + 1
+        return phase, cycle_number, total_cycles
+    
+    def calculate_binned_average_numba(phase, y_data_normalized, num_bins=20):
+        phase_bins = np.linspace(0, 1, num_bins + 1)
+        bin_centers = (phase_bins[:-1] + phase_bins[1:]) / 2
+        mean_binned_values = np.full(num_bins, np.nan)
+        for i in range(num_bins):
+            mask = (phase >= phase_bins[i]) & (phase < phase_bins[i+1])
+            if np.any(mask):
+                mean_binned_values[i] = np.mean(y_data_normalized[mask])
+        return bin_centers, mean_binned_values
+
+# Wrapper for scipy.optimize.curve_fit (cannot use numba directly)
+def model_f(Phi_ext, I_c, phi_0, f, T, r, C):
+    """Wrapper function for curve_fit compatibility"""
+    return model_f_numba(Phi_ext, I_c, phi_0, f, T, r, C)
+
+# Cached frequency array generation
+@lru_cache(maxsize=128)
+def generate_frequency_array(n_points, median_diff, n_freq=10000):
+    """Generate frequency array with caching"""
+    freq_min = 1e-6
+    freq_max = 1 / (2 * median_diff)
+    return np.linspace(freq_min, freq_max, n_freq)
+
+# Configuration for optimized processing
+MAX_WORKERS = min(8, multiprocessing.cpu_count())  # Limit workers to prevent memory issues
+PLOT_SIZE = (19.2, 10.8)  # 1920x1080 at 100 DPI
+PLOT_DPI = 100
 
 class EnhancedJosephsonProcessor:
     """Enhanced Josephson junction data processor with all optimizations"""
@@ -41,13 +186,49 @@ class EnhancedJosephsonProcessor:
         self.frequency_analyzer = FrequencyAnalyzer(config)
         self.phase_analyzer = PhaseAnalyzer(config)
         
-        # Thread-safe counters
+        # Thread-safe counters and output management
         self.lock = threading.Lock()
         self.progress = {'current': 0, 'total': 0}
         self.results = []
         
         # Pre-compile numba functions
         self._precompile_numba()
+        
+        self.logger.logger.info(f"Initialized EnhancedJosephsonProcessor")
+        self.logger.logger.info(f"Using FireDucks pandas: {USING_FIREDUCKS}")
+        self.logger.logger.info(f"Using Numba optimization: {HAS_NUMBA}")
+        self.logger.logger.info(f"Max workers: {MAX_WORKERS}")
+        self.logger.logger.info(f"Plot size: {PLOT_SIZE} at {PLOT_DPI} DPI")
+    
+    def safe_print(self, message):
+        """Thread-safe print function to prevent BrokenPipeError"""
+        try:
+            with self.lock:
+                print(message)
+                sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            # Handle broken pipe gracefully - continue processing silently
+            pass
+
+    def update_progress(self, dataid, success, error_msg=None):
+        """Thread-safe progress update with reduced output"""
+        try:
+            with self.lock:
+                self.progress['current'] += 1
+                current = self.progress['current']
+                total = self.progress['total']
+                
+                # Show every 20th success or all failures to reduce output
+                if current % 20 == 0 or not success:
+                    status = "✓" if success else "✗"
+                    message = f"{status} [{current}/{total}] {dataid}"
+                    if not success and error_msg:
+                            message += f": {error_msg[:50]}..."
+                    self.logger.logger.info(message)
+                    
+        except (BrokenPipeError, OSError):
+            # Handle pipe errors gracefully
+            pass
     
     def _precompile_numba(self):
         """Pre-compile numba functions for better performance"""
@@ -57,16 +238,16 @@ class EnhancedJosephsonProcessor:
             dummy_x = np.array([1.0, 2.0, 3.0], dtype=np.float64)
             dummy_y = np.array([1.0, 2.0, 3.0], dtype=np.float64)
             
-            from .josephson_model import josephson_model_numba, calculate_statistics_numba
-            from .analysis_utils import calculate_phase_data_numba, calculate_binned_average_numba
-            
-            _ = josephson_model_numba(dummy_x, 1.0, 0.0, 1.0, 0.5, 0.0, 0.0)
-            _ = calculate_statistics_numba(dummy_y, dummy_y, 6)
-            _ = preprocess_data_numba(dummy_x, dummy_y)
-            _ = calculate_phase_data_numba(dummy_x, 1.0)
-            _ = calculate_binned_average_numba(dummy_x/2, dummy_y)
-            
-            self.logger.logger.info("✓ Numba functions compiled successfully")
+            if HAS_NUMBA:
+                _ = model_f_numba(dummy_x, 1.0, 0.0, 1.0, 0.5, 0.0, 0.0)
+                _ = calculate_statistics_numba(dummy_y, dummy_y, 6)
+                _ = preprocess_data_numba(dummy_x, dummy_y)
+                _ = calculate_phase_data_numba(dummy_x, 1.0)
+                _ = calculate_binned_average_numba(dummy_x/2, dummy_y)
+                self.logger.logger.info("✓ Numba functions compiled successfully")
+            else:
+                self.logger.logger.info("✓ Using non-Numba implementations")
+                
         except Exception as e:
             self.logger.logger.warning(f"Numba compilation warning: {e}")
     

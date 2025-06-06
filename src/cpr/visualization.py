@@ -6,11 +6,12 @@ matplotlib.use('Agg')  # Non-interactive backend for multithreading
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.patches import Rectangle
+from matplotlib.figure import Figure
 import numpy as np
 from scipy import stats
 import seaborn as sns
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Union
 import warnings
 
 # Set style
@@ -48,7 +49,7 @@ class PublicationPlotter:
     
     def create_fitted_curve_plot(self, x_data: np.ndarray, y_data: np.ndarray, 
                                fitted_data: np.ndarray, parameters: dict, 
-                               statistics: dict, dataid: str, normalized: bool = True) -> plt.Figure:
+                               statistics: dict, dataid: str, normalized: bool = True) -> Figure:
         """Create fitted curve plot with parameter information"""
         fig, ax = plt.subplots(figsize=self.config.get('FIGURE_SIZE', (12, 8)))
         
@@ -99,11 +100,11 @@ class PublicationPlotter:
         return fig
     
     def create_residuals_analysis_plot(self, x_data: np.ndarray, y_data: np.ndarray, 
-                                     fitted_data: np.ndarray, dataid: str) -> plt.Figure:
+                                     fitted_data: np.ndarray, dataid: str) -> Figure:
         """Create comprehensive residuals analysis plot"""
         residuals = y_data - fitted_data
         
-        fig = plt.figure(figsize=(14, 10))
+        fig = plt.figure(figsize=self.config.get('FIGURE_SIZE', (19.2, 10.8)))
         gs = gridspec.GridSpec(3, 3, figure=fig)
         
         # Main residuals plot
@@ -192,9 +193,9 @@ Durbin-Watson: {self._durbin_watson(residuals):.3f}"""
         return fig
     
     def create_phase_folded_plot(self, phase_data: dict, dataid: str, 
-                               frequency: float) -> plt.Figure:
+                               frequency: float) -> Figure:
         """Create enhanced phase-folded plot with drift analysis"""
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12))
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=self.config.get('FIGURE_SIZE', (19.2, 10.8)))
         
         # Main phase-folded plot
         cycle_data = phase_data['cycle_data']
@@ -267,9 +268,9 @@ Max drift: {drift_stats['max_drift']:.6f}"""
         return fig
     
     def create_cycle_colored_plot(self, x_data: np.ndarray, y_data: np.ndarray, 
-                                phase_data: dict, dataid: str, frequency: float) -> plt.Figure:
+                                phase_data: dict, dataid: str, frequency: float) -> Figure:
         """Create plot with cycles colored differently"""
-        fig, ax = plt.subplots(figsize=(14, 8))
+        fig, ax = plt.subplots(figsize=self.config.get('FIGURE_SIZE', (19.2, 10.8)))
         
         cycle_number = phase_data['cycle_number']
         total_cycles = phase_data['total_cycles']
@@ -297,22 +298,22 @@ Max drift: {drift_stats['max_drift']:.6f}"""
         plt.tight_layout()
         return fig
     
-    def save_plot(self, fig: plt.Figure, filepath: str, formats: List[str] = None):
+    def save_plot(self, fig: Figure, filepath: Union[str, Path], formats: Optional[List[str]] = None):
         """Save plot in multiple formats with error handling"""
         if formats is None:
             formats = self.config.get('PLOT_FORMATS', ['png'])
         
         filepath = Path(filepath)
+        dpi = self.config.get('DPI_HIGH', 100)  # Use configured DPI
         
         for fmt in formats:
             try:
                 output_path = filepath.with_suffix(f'.{fmt}')
-                fig.savefig(output_path, dpi=self.config.dpi, 
+                fig.savefig(output_path, dpi=dpi, 
                            bbox_inches='tight', format=fmt, 
                            facecolor='white', edgecolor='none')
             except Exception as e:
-                if hasattr(self, 'logger'):
-                    self.logger.error(f"Failed to save {output_path}: {e}")
+                print(f"Failed to save {output_path}: {e}")  # Use print instead of logger
         
         plt.close(fig)  # Clean up memory
     
