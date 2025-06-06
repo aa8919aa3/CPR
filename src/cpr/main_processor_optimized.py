@@ -27,8 +27,13 @@ try:
     import numba
     from numba import jit, prange
     HAS_NUMBA = True
-except ImportError:
+    print("✓ Numba JIT acceleration available")
+except ImportError as e:
     HAS_NUMBA = False
+    print(f"⚠️ Numba not available ({e}), using standard Python implementations")
+except Exception as e:
+    HAS_NUMBA = False
+    print(f"⚠️ Numba compatibility issue ({e}), using standard Python implementations")
 
 # Try to import optimized pandas, fallback to standard pandas
 try:
@@ -287,7 +292,7 @@ def generate_frequency_array(n_points, median_diff, n_freq=10000):
     return frequencies
 
 # Configuration for optimized processing
-MAX_WORKERS = min(2, multiprocessing.cpu_count())  # Reduced to 2 workers to prevent race conditions
+MAX_WORKERS = min(8, multiprocessing.cpu_count())  # Increased to 8 workers for better performance
 # Calculate exact figure size to get 1920x1080 pixel output
 PLOT_SIZE = (1920/100, 1080/100)  # 19.2 x 10.8 inches at 100 DPI = exactly 1920x1080 pixels
 PLOT_DPI = 100

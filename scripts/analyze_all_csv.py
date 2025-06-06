@@ -205,8 +205,8 @@ def main():
     
     # 測試模組導入
     try:
-        from cpr.main_processor_optimized import EnhancedJosephsonProcessor
-        print("✓ 成功導入 EnhancedJosephsonProcessor")
+        from cpr.main_processor_optimized import EnhancedJosephsonProcessor, MAX_WORKERS
+        print("✓ 成功導入 EnhancedJosephsonProcessor 和 MAX_WORKERS")
     except ImportError as e:
         print(f"❌ 導入失敗: {e}")
         return 1
@@ -256,13 +256,13 @@ def main():
     
     # 創建處理器
     processor = EnhancedJosephsonProcessor()
+    
     if args.max_workers:
-        processor.max_workers = args.max_workers
-        print(f"🔧 設置最大工作線程數: {args.max_workers}")
+        print(f"🔧 注意: max_workers 參數 ({args.max_workers}) 已提供，但處理器使用固定的 MAX_WORKERS = {MAX_WORKERS}")
     
     print(f"⚙️  處理器配置:")
-    print(f"   最大工作線程: {processor.max_workers}")
-    print(f"   使用Numba優化: {hasattr(processor, 'numba_enabled')}")
+    print(f"   最大工作線程: {MAX_WORKERS}")
+    print(f"   使用Numba優化: {hasattr(processor, 'config')}")
     
     # 開始處理
     print("\n" + "=" * 60)
