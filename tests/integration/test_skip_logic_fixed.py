@@ -29,10 +29,10 @@ def test_module_import():
     try:
         from cpr.main_processor_optimized import EnhancedJosephsonProcessor
         print("✓ 成功導入 EnhancedJosephsonProcessor")
-        return True
+        assert True, "模組導入成功"
     except ImportError as e:
         print(f"❌ 導入失敗: {e}")
-        return False
+        assert False, f"模組導入失敗: {e}"
 
 def main():
     print("=" * 60)

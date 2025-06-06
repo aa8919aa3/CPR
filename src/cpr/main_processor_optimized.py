@@ -41,6 +41,9 @@ except ImportError:
 # Import visualization libraries
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for multithreading
+# Configure matplotlib font settings to avoid font warnings
+matplotlib.rcParams['font.family'] = ['DejaVu Sans', 'Arial', 'sans-serif']
+matplotlib.rcParams['axes.unicode_minus'] = False
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 from scipy import stats

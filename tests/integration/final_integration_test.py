@@ -17,8 +17,8 @@ sys.path.insert(0, str(project_root / "src"))
 # Import the optimized processor
 from cpr.main_processor_optimized import EnhancedJosephsonProcessor
 
-def test_image_dimensions(output_dir):
-    """測試生成的圖像是否具有正確的尺寸"""
+def verify_image_dimensions(output_dir):
+    """驗證生成的圖像是否具有正確的尺寸"""
     png_files = glob.glob(os.path.join(output_dir, "*.png"))
     
     print(f"\n=== 圖像尺寸驗證 ===")
@@ -44,7 +44,7 @@ def test_image_dimensions(output_dir):
     print(f"\n正確尺寸的圖像: {correct_size_count}/{min(10, len(png_files))}")
     return correct_size_count > 0
 
-def test_all_plot_types(output_dir, test_dataid="369Ic"):
+def verify_all_plot_types(output_dir, test_dataid="369Ic"):
     """檢查是否生成了所有類型的圖表"""
     expected_plots = [
         f"{test_dataid}_fitted_curve_normalized_plot.png",
@@ -115,8 +115,8 @@ def performance_benchmark():
     print(f"  平均處理時間: {processing_time/len(test_files):.2f} 秒/文件")
     
     # 檢查圖像質量
-    image_quality_ok = test_image_dimensions(output_dir)
-    plot_types_ok = test_all_plot_types(output_dir, Path(test_files[0]).stem)
+    image_quality_ok = verify_image_dimensions(output_dir)
+    plot_types_ok = verify_all_plot_types(output_dir, Path(test_files[0]).stem)
     
     # 總體評估
     overall_success = (
@@ -169,6 +169,17 @@ def main():
         import traceback
         traceback.print_exc()
         return False
+
+# pytest 測試函數
+def test_integration_performance_benchmark():
+    """pytest 集成測試 - 性能基準測試"""
+    result = performance_benchmark()
+    assert result, "性能基準測試失敗"
+
+def test_integration_full():
+    """pytest 集成測試 - 完整測試"""
+    result = main()
+    assert result, "完整集成測試失敗"
 
 if __name__ == "__main__":
     success = main()

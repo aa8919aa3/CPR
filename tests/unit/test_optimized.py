@@ -8,9 +8,8 @@ import time
 from pathlib import Path
 
 # Add the src directory to the Python path
-current_dir = Path(__file__).parent
-src_dir = current_dir / "src"
-sys.path.insert(0, str(src_dir))
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root / "src"))
 
 from cpr.main_processor_optimized import EnhancedJosephsonProcessor
 from cpr.config import config

@@ -8,9 +8,8 @@ import time
 from pathlib import Path
 
 # Add the src directory to the Python path
-current_dir = Path(__file__).parent
-src_dir = current_dir / "src"
-sys.path.insert(0, str(src_dir))
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root / "src"))
 
 from cpr.main_processor_optimized import EnhancedJosephsonProcessor
 from cpr.config import config
@@ -108,7 +107,13 @@ def test_process_files():
     
     print(f"\n=== Test Complete ===")
     print("✅ process_files method is working correctly!")
-    return results
+    
+    # 使用 assert 進行驗證而不是返回值
+    assert len(results) > 0, "應該有處理結果"
+    successful_results = [r for r in results if r.get('success', False)]
+    assert len(successful_results) > 0, "應該有成功的處理結果"
+    
+    print(f"成功處理了 {len(successful_results)}/{len(results)} 個檔案")
 
 if __name__ == "__main__":
     test_process_files()
