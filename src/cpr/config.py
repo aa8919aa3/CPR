@@ -13,8 +13,8 @@ class Config:
     
     DEFAULT_CONFIG = {
         # File paths
-        'INPUT_FOLDER': 'Ic',
-        'OUTPUT_FOLDER': 'batch_results',
+        'INPUT_FOLDER': 'data/Ic',
+        'OUTPUT_FOLDER': 'output',
         'SUMMARY_FILE': 'analysis_summary.csv',
         'LOG_FILE': 'processing.log',
         

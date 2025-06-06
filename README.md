@@ -1,11 +1,11 @@
-# CPR - Critical Point Research
+# CPR - Current-Phase Relation
 ## Josephson Junction Analysis Suite
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Performance](https://img.shields.io/badge/performance-optimized-green.svg)]()
 
-A high-performance, production-ready analysis suite for Josephson junction supercurrent data with advanced physics modeling, parallel processing, and publication-quality visualization.
+A high-performance, production-ready analysis suite for Josephson junction current-phase relation analysis with advanced physics modeling, parallel processing, and publication-quality visualization.
 
 ## 🚀 Key Features
 
@@ -45,15 +45,30 @@ A high-performance, production-ready analysis suite for Josephson junction super
 ```bash
 git clone https://github.com/aa8919aa3/CPR.git
 cd CPR
+python3.11 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install --upgrade pip
 pip install -r requirements.txt
+pip install -e .
+```
+
+### Using Makefile (Recommended)
+```bash
+git clone https://github.com/aa8919aa3/CPR.git
+cd CPR
+make setup  # This will create venv, install dependencies, and setup the project
 ```
 
 ### Development Install
 ```bash
 git clone https://github.com/aa8919aa3/CPR.git
 cd CPR
-pip install -e .
+python3.11 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install --upgrade pip
+pip install -r requirements.txt
 pip install -r requirements-dev.txt
+pip install -e .
 ```
 
 ### Optional High-Performance Dependencies
@@ -67,13 +82,13 @@ pip install numba            # JIT compilation (usually auto-installed)
 
 ### Basic Usage
 ```python
-from main_processor import EnhancedJosephsonProcessor
+from cpr import EnhancedJosephsonProcessor
 
 # Initialize processor
 processor = EnhancedJosephsonProcessor()
 
 # Process single file
-result = processor.process_single_file('data/sample.csv')
+result = processor.process_single_file('data/Ic/sample.csv')
 
 # Batch process all files
 processor.batch_process_files()
@@ -81,14 +96,32 @@ processor.batch_process_files()
 
 ### Command Line Usage
 ```bash
-# Process all CSV files in the Ic folder
-python main_processor.py
+# Process all CSV files in the data/Ic folder
+python run_analysis.py
+
+# Or using the installed package
+cpr-process
 
 # Use environment variables for configuration
-JJ_MAX_WORKERS=4 JJ_FAST_MODE=true python main_processor.py
+JJ_MAX_WORKERS=4 JJ_FAST_MODE=true python run_analysis.py
 
 # Enable debug logging
-JJ_LOG_LEVEL=DEBUG python main_processor.py
+JJ_LOG_LEVEL=DEBUG python run_analysis.py
+```
+
+### Using Makefile
+```bash
+# Run analysis
+make run
+
+# Run on sample data
+make run-sample
+
+# Run tests
+make test
+
+# Format and lint code
+make format lint
 ```
 
 ### Input Data Format
@@ -111,24 +144,33 @@ y_field,Ic
 CPR/
 ├── README.md                    # This file
 ├── requirements.txt             # Python dependencies
+├── requirements-dev.txt         # Development dependencies
 ├── config.json                  # Default configuration
+├── setup.py                     # Package setup (legacy)
+├── pyproject.toml              # Modern Python project configuration
+├── Makefile                     # Development automation
+├── run_analysis.py             # Main entry point
 ├── .gitignore                   # Git ignore patterns
 ├── LICENSE                      # MIT License
 │
-├── main_processor.py            # 🚀 Main processing engine
-├── config.py                    # ⚙️ Configuration management
-├── logger.py                    # 📝 Advanced logging system
-├── josephson_model.py           # 🔬 Physics modeling (Numba optimized)
-├── analysis_utils.py            # 📊 Analysis utilities
-├── visualization.py             # 📈 Publication-quality plots
-├── memory_manager.py            # 💾 Memory and resource management
+├── src/cpr/                     # 📦 Main package
+│   ├── __init__.py             # Package initialization
+│   ├── main_processor.py        # 🚀 Main processing engine
+│   ├── config.py                # ⚙️ Configuration management
+│   ├── logger.py                # 📝 Advanced logging system
+│   ├── josephson_model.py       # 🔬 Physics modeling (Numba optimized)
+│   ├── analysis_utils.py        # 📊 Analysis utilities
+│   ├── visualization.py         # 📈 Publication-quality plots
+│   └── memory_manager.py        # 💾 Memory and resource management
 │
 ├── tests/                       # Unit tests
 ├── docs/                        # Documentation
 ├── examples/                    # Example scripts and data
+├── scripts/                     # Utility scripts
 │
-├── Ic/                         # 📥 Input CSV files
-└── batch_results/              # 📤 Output analysis results
+├── data/                        # 📥 Input data
+│   └── Ic/                     # CSV input files
+└── output/                      # 📤 Output analysis results
     ├── analysis_summary.csv    # Summary of all analyses
     ├── sample1_fitted_curve_plot.png
     ├── sample1_residuals_plot.png
