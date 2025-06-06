@@ -346,8 +346,20 @@ class EnhancedJosephsonProcessor:
             inf_count = np.isinf(data).sum()
             return False, f"{name}: {nan_count} NaN, {inf_count} inf values"
         
-        if len(np.unique(data)) < 2:
-            return False, f"{name}: constant data (all values same)"
+        unique_values = np.unique(data)
+        n_unique = len(unique_values)
+        
+        if n_unique < 2:
+            return "skip", f"{name}: insufficient data variation ({n_unique} unique values) - skipping file"
+        
+        # Check if variation is too small (numerical precision issues)
+        if n_unique == 2:
+            data_range = np.ptp(data)  # peak-to-peak (max - min)
+            data_scale = np.abs(np.mean(data))
+            if data_scale > 0:
+                relative_variation = data_range / data_scale
+                if relative_variation < 1e-10:  # Very small relative variation
+                    return "skip", f"{name}: variation too small (relative: {relative_variation:.2e}) - skipping file"
             
         return True, "OK"
     
@@ -361,11 +373,15 @@ class EnhancedJosephsonProcessor:
             
         # Check normalized data
         x_valid, x_msg = self.validate_data_array(x_norm, "x_normalized")
-        if not x_valid:
+        if x_valid == "skip":
+            return "skip", x_msg
+        elif not x_valid:
             return False, x_msg
             
         y_valid, y_msg = self.validate_data_array(y_norm, "y_normalized")
-        if not y_valid:
+        if y_valid == "skip":
+            return "skip", y_msg
+        elif not y_valid:
             return False, y_msg
             
         return True, "OK"
@@ -467,7 +483,15 @@ class EnhancedJosephsonProcessor:
             
             # Validate preprocessing results
             valid, error_msg = self.validate_preprocessing_result(x_data_normalized, y_data_normalized, x_factor, y_factor)
-            if not valid:
+            if valid == "skip":
+                self.update_progress(dataid, False, f"Data quality insufficient: {error_msg}")
+                return {
+                    'dataid': dataid,
+                    'success': False,
+                    'error': f'Data quality insufficient: {error_msg}',
+                    'skipped': True  # Mark this as a skip rather than an error
+                }
+            elif not valid:
                 self.update_progress(dataid, False, f"NaN/inf values after preprocessing: {error_msg}")
                 return {
                     'dataid': dataid,
@@ -475,21 +499,23 @@ class EnhancedJosephsonProcessor:
                     'error': f'NaN/inf values after preprocessing: {error_msg}'
                 }
             
-            # Additional data quality checks
+            # Additional data quality checks (these should be redundant now due to validate_preprocessing_result)
             if np.std(x_data_normalized) < 1e-12:
-                self.update_progress(dataid, False, "X data has no variation")
+                self.update_progress(dataid, False, "X data has no variation - skipping")
                 return {
                     'dataid': dataid,
                     'success': False,
-                    'error': 'X data has no variation'
+                    'error': 'X data has no variation',
+                    'skipped': True
                 }
                 
             if np.std(y_data_normalized) < 1e-12:
-                self.update_progress(dataid, False, "Y data has no variation")
+                self.update_progress(dataid, False, "Y data has no variation - skipping")
                 return {
                     'dataid': dataid,
                     'success': False,
-                    'error': 'Y data has no variation'
+                    'error': 'Y data has no variation',
+                    'skipped': True
                 }
             
             # Check for numerical issues after preprocessing
