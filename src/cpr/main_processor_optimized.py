@@ -89,14 +89,46 @@ if HAS_NUMBA:
 
     @jit(nopython=True, cache=True, fastmath=True)
     def preprocess_data_numba(x_data, y_data):
-        """Fast data preprocessing using numba"""
+        """Fast data preprocessing using numba with robust scaling factors"""
         # Data shift and normalization by the first data point
         x_data_shifted = x_data - x_data[0]
         y_data_shifted = y_data - np.min(y_data)
         
-        x_factor = abs(x_data_shifted[2] - x_data_shifted[1])
-        y_factor = abs(y_data_shifted[2] - y_data_shifted[1])
+        # Robust x_factor calculation
+        if len(x_data_shifted) > 2:
+            x_factor = abs(x_data_shifted[2] - x_data_shifted[1])
+        else:
+            x_factor = 1.0
+            
+        # If x_factor is too small, use standard deviation or range
+        if x_factor < 1e-12:
+            x_std = np.std(x_data_shifted)
+            if x_std > 1e-12:
+                x_factor = x_std
+            else:
+                x_range = np.max(x_data_shifted) - np.min(x_data_shifted)
+                x_factor = x_range if x_range > 1e-12 else 1.0
+            
+        # Robust y_factor calculation - key improvement
+        if len(y_data_shifted) > 2:
+            y_factor = abs(y_data_shifted[2] - y_data_shifted[1])
+        else:
+            y_factor = 1.0
         
+        # If y_factor is too small or zero, use alternative methods
+        if y_factor < 1e-12:
+            y_std = np.std(y_data_shifted)
+            if y_std > 1e-12:
+                y_factor = y_std
+            else:
+                y_range = np.max(y_data_shifted) - np.min(y_data_shifted)
+                y_factor = y_range if y_range > 1e-12 else 1.0
+        
+        # Final safety check with larger minimum threshold
+        x_factor = max(x_factor, 1e-6)
+        y_factor = max(y_factor, 1e-6)
+        
+        # Normalize
         x_data_normalized = x_data_shifted / x_factor
         y_data_normalized = y_data_shifted / y_factor
         
@@ -152,8 +184,41 @@ else:
     def preprocess_data_numba(x_data, y_data):
         x_data_shifted = x_data - x_data[0]
         y_data_shifted = y_data - np.min(y_data)
-        x_factor = abs(x_data_shifted[2] - x_data_shifted[1])
-        y_factor = abs(y_data_shifted[2] - y_data_shifted[1])
+        
+        # Robust x_factor calculation
+        if len(x_data_shifted) > 2:
+            x_factor = abs(x_data_shifted[2] - x_data_shifted[1])
+        else:
+            x_factor = 1.0
+            
+        # If x_factor is too small, use standard deviation or range
+        if x_factor < 1e-12:
+            x_std = np.std(x_data_shifted)
+            if x_std > 1e-12:
+                x_factor = x_std
+            else:
+                x_range = np.max(x_data_shifted) - np.min(x_data_shifted)
+                x_factor = x_range if x_range > 1e-12 else 1.0
+            
+        # Robust y_factor calculation
+        if len(y_data_shifted) > 2:
+            y_factor = abs(y_data_shifted[2] - y_data_shifted[1])
+        else:
+            y_factor = 1.0
+        
+        # If y_factor is too small or zero, use alternative methods
+        if y_factor < 1e-12:
+            y_std = np.std(y_data_shifted)
+            if y_std > 1e-12:
+                y_factor = y_std
+            else:
+                y_range = np.max(y_data_shifted) - np.min(y_data_shifted)
+                y_factor = y_range if y_range > 1e-12 else 1.0
+        
+        # Final safety check with larger minimum threshold
+        x_factor = max(x_factor, 1e-6)
+        y_factor = max(y_factor, 1e-6)
+        
         x_data_normalized = x_data_shifted / x_factor
         y_data_normalized = y_data_shifted / y_factor
         return x_data_normalized, y_data_normalized, x_factor, y_factor
@@ -182,10 +247,30 @@ def model_f(Phi_ext, I_c, phi_0, f, T, r, C):
 # Cached frequency array generation
 @lru_cache(maxsize=128)
 def generate_frequency_array(n_points, median_diff, n_freq=10000):
-    """Generate frequency array with caching"""
-    freq_min = 1e-6
+    """Generate frequency array with caching and safety checks"""
+    # Input validation
+    if not np.isfinite(median_diff) or median_diff <= 0:
+        median_diff = 1.0  # Fallback value
+    
+    # Use a more conservative minimum frequency to avoid numerical issues
+    freq_min = max(1e-5, 1.0 / (n_points * median_diff))  # Nyquist-informed minimum
     freq_max = 1 / (2 * median_diff)
-    return np.linspace(freq_min, freq_max, n_freq)
+    
+    # Ensure freq_max is reasonable and greater than freq_min
+    if not np.isfinite(freq_max) or freq_max <= freq_min:
+        freq_max = max(1.0, freq_min * 1000)  # Ensure reasonable range
+    
+    # Ensure we have a reasonable frequency range
+    if freq_max / freq_min < 10:
+        freq_min = freq_max / 1000  # Ensure at least 3 orders of magnitude
+    
+    frequencies = np.linspace(freq_min, freq_max, n_freq)
+    
+    # Final validation
+    if not np.isfinite(frequencies).all():
+        frequencies = np.linspace(1e-5, 1.0, n_freq)  # Safe fallback with higher minimum
+    
+    return frequencies
 
 # Configuration for optimized processing
 MAX_WORKERS = min(8, multiprocessing.cpu_count())  # Limit workers to prevent memory issues
@@ -235,6 +320,37 @@ class EnhancedJosephsonProcessor:
                 
         except Exception as e:
             self.logger.logger.warning(f"Numba compilation warning: {e}")
+
+    def validate_data_array(self, data, name):
+        """Validate data array for NaN/inf values and provide detailed diagnostics"""
+        if not np.isfinite(data).all():
+            nan_count = np.isnan(data).sum()
+            inf_count = np.isinf(data).sum()
+            return False, f"{name}: {nan_count} NaN, {inf_count} inf values"
+        
+        if len(np.unique(data)) < 2:
+            return False, f"{name}: constant data (all values same)"
+            
+        return True, "OK"
+    
+    def validate_preprocessing_result(self, x_norm, y_norm, x_factor, y_factor):
+        """Comprehensive validation of preprocessing results"""
+        # Check normalization factors
+        if not np.isfinite(x_factor) or x_factor <= 0:
+            return False, f"Invalid x_factor: {x_factor}"
+        if not np.isfinite(y_factor) or y_factor <= 0:
+            return False, f"Invalid y_factor: {y_factor}"
+            
+        # Check normalized data
+        x_valid, x_msg = self.validate_data_array(x_norm, "x_normalized")
+        if not x_valid:
+            return False, x_msg
+            
+        y_valid, y_msg = self.validate_data_array(y_norm, "y_normalized")
+        if not y_valid:
+            return False, y_msg
+            
+        return True, "OK"
     
     def safe_print(self, message):
         """Thread-safe print function to prevent BrokenPipeError"""
@@ -316,6 +432,33 @@ class EnhancedJosephsonProcessor:
             # Fast data preprocessing using numba
             x_data_normalized, y_data_normalized, x_factor, y_factor = preprocess_data_numba(x_data, y_data)
             
+            # Validate preprocessing results
+            valid, error_msg = self.validate_preprocessing_result(x_data_normalized, y_data_normalized, x_factor, y_factor)
+            if not valid:
+                self.update_progress(dataid, False, f"NaN/inf values after preprocessing: {error_msg}")
+                return {
+                    'dataid': dataid,
+                    'success': False,
+                    'error': f'NaN/inf values after preprocessing: {error_msg}'
+                }
+            
+            # Additional data quality checks
+            if np.std(x_data_normalized) < 1e-12:
+                self.update_progress(dataid, False, "X data has no variation")
+                return {
+                    'dataid': dataid,
+                    'success': False,
+                    'error': 'X data has no variation'
+                }
+                
+            if np.std(y_data_normalized) < 1e-12:
+                self.update_progress(dataid, False, "Y data has no variation")
+                return {
+                    'dataid': dataid,
+                    'success': False,
+                    'error': 'Y data has no variation'
+                }
+            
             # Check for numerical issues after preprocessing
             if not (np.all(np.isfinite(x_data_normalized)) and np.all(np.isfinite(y_data_normalized))):
                 self.update_progress(dataid, False, "NaN/inf values after preprocessing")
@@ -336,11 +479,67 @@ class EnhancedJosephsonProcessor:
             
             # Cached frequency array generation
             median_diff = np.median(np.diff(x_data_normalized))
+            
+            # Validate median_diff
+            if not np.isfinite(median_diff) or median_diff <= 0:
+                self.update_progress(dataid, False, f"Invalid median_diff: {median_diff}")
+                return {
+                    'dataid': dataid,
+                    'success': False,
+                    'error': f'Invalid median_diff: {median_diff}'
+                }
+                
             frequencies = generate_frequency_array(len(x_data_normalized), median_diff)
             
+            # Validate frequency array
+            if not np.isfinite(frequencies).all():
+                self.update_progress(dataid, False, "Invalid frequency array")
+                return {
+                    'dataid': dataid,
+                    'success': False,
+                    'error': 'Invalid frequency array'
+                }
+            
             # Calculate Lomb-Scargle periodogram
-            ls = LombScargle(x_data_normalized, y_data_normalized)
-            power = ls.power(frequencies)
+            try:
+                ls = LombScargle(x_data_normalized, y_data_normalized)
+                power = ls.power(frequencies)
+                
+                # Fix numerical issues in power spectrum
+                if not np.isfinite(power).all():
+                    nan_count = np.isnan(power).sum()
+                    inf_count = np.isinf(power).sum()
+                    
+                    # Try to fix inf values by clipping them
+                    if inf_count > 0 and inf_count < len(power) * 0.1:  # Less than 10% inf values
+                        max_finite_power = np.max(power[np.isfinite(power)])
+                        power[np.isinf(power)] = max_finite_power * 2  # Replace inf with reasonable value
+                        self.update_progress(dataid, True, f"Fixed {inf_count} inf values in power spectrum")
+                    
+                    # Try to fix NaN values
+                    if nan_count > 0 and nan_count < len(power) * 0.1:  # Less than 10% NaN values
+                        mean_finite_power = np.mean(power[np.isfinite(power)])
+                        power[np.isnan(power)] = mean_finite_power  # Replace NaN with mean
+                        self.update_progress(dataid, True, f"Fixed {nan_count} NaN values in power spectrum")
+                    
+                    # Final check after fixes
+                    if not np.isfinite(power).all():
+                        remaining_nan = np.isnan(power).sum()
+                        remaining_inf = np.isinf(power).sum()
+                        self.update_progress(dataid, False, f"Could not fix power spectrum: {remaining_nan} NaN, {remaining_inf} inf")
+                        return {
+                            'dataid': dataid,
+                            'success': False,
+                            'error': f'Unfixable power spectrum: {remaining_nan} NaN, {remaining_inf} inf'
+                        }
+                    
+            except Exception as e:
+                self.update_progress(dataid, False, f"Lomb-Scargle calculation failed: {str(e)[:30]}...")
+                return {
+                    'dataid': dataid,
+                    'success': False,
+                    'error': f'Lomb-Scargle calculation failed: {str(e)}'
+                }
             
             # Check for numerical issues in power spectrum
             if not np.all(np.isfinite(power)):
