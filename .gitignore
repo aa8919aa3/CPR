@@ -159,7 +159,7 @@ cython_debug/
 .idea/
 
 # Project specific
-output/
+# output/
 # *.csv
 # *.png
 *.pdf

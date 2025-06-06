@@ -1,0 +1,48 @@
+{
+  "total_files": 534,
+  "successful": 457,
+  "skipped": 13,
+  "failed": 64,
+  "success_rate": 85.58052434456928,
+  "skip_rate": 2.4344569288389515,
+  "processing_time": 362.720153093338,
+  "average_time_per_file": 0.6792512230212322,
+  "timestamp": "2025-06-07T01:36:36.800033",
+  "i_c_statistics": {
+    "mean": 2.660257849370738e-05,
+    "std": 0.00027567785222081827,
+    "min": 1.173558908599739e-11,
+    "max": 0.004629475348224943,
+    "median": 2.9768410537811814e-06
+  },
+  "r_squared_statistics": {
+    "mean": 0.65547691120453,
+    "std": 0.2705752238009699,
+    "min": 0.00564854767364209,
+    "max": 0.9893450065278618,
+    "median": 0.6682132040442239
+  },
+  "skip_reasons": {
+    "Data quality insufficient: y_normalized: insufficient data variation (1 unique values) - skipping file": 13
+  },
+  "failure_reasons": {
+    "Insufficient data points (11 < 20)": 9,
+    "Insufficient data points (17 < 20)": 3,
+    "Insufficient data points (13 < 20)": 4,
+    "Insufficient data points (3 < 20)": 7,
+    "Insufficient data points (2 < 20)": 6,
+    "Insufficient data points (7 < 20)": 3,
+    "Insufficient data points (14 < 20)": 3,
+    "Insufficient data points (18 < 20)": 4,
+    "Curve fitting failed: Optimal parameters not found: The maximum number of function evaluations is exceeded.": 1,
+    "Insufficient data points (19 < 20)": 2,
+    "Insufficient data points (5 < 20)": 3,
+    "Insufficient data points (15 < 20)": 3,
+    "Insufficient data points (16 < 20)": 2,
+    "Insufficient data points (6 < 20)": 6,
+    "Insufficient data points (10 < 20)": 2,
+    "Insufficient data points (9 < 20)": 3,
+    "Insufficient data points (8 < 20)": 2,
+    "Insufficient data points (12 < 20)": 1
+  }
+}
