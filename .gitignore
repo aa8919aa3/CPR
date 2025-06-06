@@ -160,8 +160,8 @@ cython_debug/
 
 # Project specific
 output/
-*.csv
-*.png
+# *.csv
+# *.png
 *.pdf
 *.svg
 *.log
