@@ -540,15 +540,6 @@ class EnhancedJosephsonProcessor:
                     'success': False,
                     'error': f'Lomb-Scargle calculation failed: {str(e)}'
                 }
-            
-            # Check for numerical issues in power spectrum
-            if not np.all(np.isfinite(power)):
-                self.update_progress(dataid, False, "NaN/inf in power spectrum")
-                return {
-                    'dataid': dataid,
-                    'success': False,
-                    'error': 'NaN/inf in power spectrum'
-                }
 
             # Find peaks in the power spectrum
             height_threshold = np.max(power) * 0.1  # Peak height threshold
