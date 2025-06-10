@@ -10,7 +10,7 @@ import threading
 import multiprocessing
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 import numpy as np
 import traceback
 from functools import lru_cache
@@ -57,14 +57,67 @@ from astropy.timeseries import LombScargle
 
 try:
     from .config import config
-    from .logger import init_logger
+    from .logger import init_logger  # type: ignore
+    from .josephson_model import preprocess_data_numba as preprocess_data_improved
 except ImportError:
     # Fallback for direct execution
     import sys
     import os
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from config import config
-    from logger import init_logger
+    try:
+        from config import config  # type: ignore
+    except ImportError:
+        # Create minimal config if not available
+        class Config:
+            def __init__(self):
+                self.JOSEPHSON_MODEL = {
+                    'MAX_ITERATIONS': 10000,
+                    'TOLERANCE': 1e-8,
+                    'USE_OPTIMIZATION': True
+                }
+                self.INPUT_FOLDER = 'data/Ic'
+                self.OUTPUT_FOLDER = 'output'
+            
+            def get(self, key, default=None):
+                return getattr(self, key, default)
+        config = Config()
+    
+    try:
+        from logger import init_logger  # type: ignore
+    except ImportError:
+        # Create minimal logger if not available
+        import logging
+        
+        def init_logger(config):
+            logging.basicConfig(level=logging.INFO)
+            logger = logging.getLogger(__name__)
+            # Create a compatible logger class that matches PerformanceLogger interface
+            class LoggerCompat:
+                def __init__(self, logger):
+                    self.logger = logger
+                    
+                def info(self, msg):
+                    self.logger.info(msg)
+                    
+                def warning(self, msg):
+                    self.logger.warning(msg)
+                    
+                def error(self, msg):
+                    self.logger.error(msg)
+                    
+                def debug(self, msg):
+                    self.logger.debug(msg)
+                    
+                def log_progress(self, current, total, item_name="item"):
+                    percentage = (current / total) * 100
+                    self.logger.info(f"Progress: {current}/{total} ({percentage:.1f}%)")
+            
+            return LoggerCompat(logger)
+    
+    try:
+        from josephson_model import preprocess_data_numba as preprocess_data_improved
+    except ImportError:
+        preprocess_data_improved = None
 
 # Numba-optimized model function
 if HAS_NUMBA:
@@ -80,6 +133,10 @@ if HAS_NUMBA:
         denominator_term = np.maximum(denominator_term, 1e-12)  # Prevent division by zero
         denominator = np.sqrt(denominator_term)
         return I_c * sin_main / denominator + r * Phi_ext + C
+
+    def model_f(Phi_ext, I_c, phi_0, f, T, r, C):
+        """Wrapper function for curve_fit compatibility"""
+        return model_f_numba(Phi_ext, I_c, phi_0, f, T, r, C)
 
     @jit(nopython=True, cache=True, fastmath=True)
     def calculate_statistics_numba(y_data, fitted_data, n_params):
@@ -107,8 +164,8 @@ if HAS_NUMBA:
         return r_squared, adj_r_squared, rmse, mae, ss_res, residual_mean, residual_std
 
     @jit(nopython=True, cache=True, fastmath=True)
-    def preprocess_data_numba(x_data, y_data):
-        """Fast data preprocessing using numba with robust scaling factors"""
+    def preprocess_data_numba_fallback(x_data, y_data):
+        """Original robust preprocessing method as fallback"""
         # Data shift and normalization by the first data point
         x_data_shifted = x_data - x_data[0]
         y_data_shifted = y_data - np.min(y_data)
@@ -144,14 +201,26 @@ if HAS_NUMBA:
                 y_factor = y_range if y_range > 1e-12 else 1.0
         
         # Final safety check with larger minimum threshold
-        x_factor = max(x_factor, 1e-6)
-        y_factor = max(y_factor, 1e-6)
+        x_factor = max(float(x_factor), 1e-6)
+        y_factor = max(float(y_factor), 1e-6)
         
         # Normalize
         x_data_normalized = x_data_shifted / x_factor
         y_data_normalized = y_data_shifted / y_factor
         
         return x_data_normalized, y_data_normalized, x_factor, y_factor
+
+    def preprocess_data_numba(x_data, y_data):
+        """Fast data preprocessing - uses improved method if available, falls back to robust method"""
+        # Try to use improved preprocessing method first
+        if preprocess_data_improved is not None:
+            try:
+                return preprocess_data_improved(x_data, y_data)
+            except:
+                pass  # Fall back to original method
+        
+        # Use fallback method
+        return preprocess_data_numba_fallback(x_data, y_data)
 
     @jit(nopython=True, cache=True, fastmath=True)
     def calculate_phase_data_numba(x_data_normalized, best_frequency):
@@ -177,40 +246,51 @@ if HAS_NUMBA:
 else:
     # Fallback implementations without numba
     def model_f_numba(Phi_ext, I_c, phi_0, f, T, r, C):
+        """Standard Josephson junction model function"""
         main_phase = 2 * np.pi * f * Phi_ext - phi_0
         half_phase = main_phase / 2
         sin_half = np.sin(half_phase)
         sin_main = np.sin(main_phase)
+        # Calculate denominator with numerical stability protection
         denominator_term = 1 - T * sin_half**2
         denominator_term = np.maximum(denominator_term, 1e-12)
         denominator = np.sqrt(denominator_term)
         return I_c * sin_main / denominator + r * Phi_ext + C
+
+    def model_f(Phi_ext, I_c, phi_0, f, T, r, C):
+        """Wrapper function for curve_fit compatibility"""
+        return model_f_numba(Phi_ext, I_c, phi_0, f, T, r, C)
     
     def calculate_statistics_numba(y_data, fitted_data, n_params):
+        """Standard statistical calculations"""
         n = len(y_data)
         y_mean = np.mean(y_data)
+        
         ss_res = np.sum((y_data - fitted_data) ** 2)
         ss_tot = np.sum((y_data - y_mean) ** 2)
+        
         r_squared = 1 - (ss_res / ss_tot)
         adj_r_squared = 1 - (1 - r_squared) * (n - 1) / (n - n_params - 1)
+        
         rmse = np.sqrt(ss_res / n)
         mae = np.mean(np.abs(y_data - fitted_data))
+        
         residuals = y_data - fitted_data
         residual_mean = np.mean(residuals)
         residual_std = np.std(residuals)
+        
         return r_squared, adj_r_squared, rmse, mae, ss_res, residual_mean, residual_std
     
-    def preprocess_data_numba(x_data, y_data):
+    def preprocess_data_numba_fallback(x_data, y_data):
+        """Standard preprocessing method as fallback"""
         x_data_shifted = x_data - x_data[0]
         y_data_shifted = y_data - np.min(y_data)
         
-        # Robust x_factor calculation
         if len(x_data_shifted) > 2:
             x_factor = abs(x_data_shifted[2] - x_data_shifted[1])
         else:
             x_factor = 1.0
             
-        # If x_factor is too small, use standard deviation or range
         if x_factor < 1e-12:
             x_std = np.std(x_data_shifted)
             if x_std > 1e-12:
@@ -219,13 +299,11 @@ else:
                 x_range = np.max(x_data_shifted) - np.min(x_data_shifted)
                 x_factor = x_range if x_range > 1e-12 else 1.0
             
-        # Robust y_factor calculation
         if len(y_data_shifted) > 2:
             y_factor = abs(y_data_shifted[2] - y_data_shifted[1])
         else:
             y_factor = 1.0
         
-        # If y_factor is too small or zero, use alternative methods
         if y_factor < 1e-12:
             y_std = np.std(y_data_shifted)
             if y_std > 1e-12:
@@ -234,34 +312,42 @@ else:
                 y_range = np.max(y_data_shifted) - np.min(y_data_shifted)
                 y_factor = y_range if y_range > 1e-12 else 1.0
         
-        # Final safety check with larger minimum threshold
-        x_factor = max(x_factor, 1e-6)
-        y_factor = max(y_factor, 1e-6)
+        x_factor = max(float(x_factor), 1e-6)
+        y_factor = max(float(y_factor), 1e-6)
         
         x_data_normalized = x_data_shifted / x_factor
         y_data_normalized = y_data_shifted / y_factor
+        
         return x_data_normalized, y_data_normalized, x_factor, y_factor
-    
+
+    def preprocess_data_numba(x_data, y_data):
+        """Data preprocessing - uses improved method if available, falls back to robust method"""
+        if preprocess_data_improved is not None:
+            try:
+                return preprocess_data_improved(x_data, y_data)
+            except:
+                pass
+        return preprocess_data_numba_fallback(x_data, y_data)
+
     def calculate_phase_data_numba(x_data_normalized, best_frequency):
+        """Standard phase calculations"""
         phase = (x_data_normalized * best_frequency) % 1.0
         cycle_number = np.floor(x_data_normalized * best_frequency).astype(np.int32)
         total_cycles = int(np.max(cycle_number)) + 1
         return phase, cycle_number, total_cycles
-    
+
     def calculate_binned_average_numba(phase, y_data_normalized, num_bins=20):
+        """Standard binned average calculation"""
         phase_bins = np.linspace(0, 1, num_bins + 1)
         bin_centers = (phase_bins[:-1] + phase_bins[1:]) / 2
         mean_binned_values = np.full(num_bins, np.nan)
+        
         for i in range(num_bins):
             mask = (phase >= phase_bins[i]) & (phase < phase_bins[i+1])
             if np.any(mask):
                 mean_binned_values[i] = np.mean(y_data_normalized[mask])
+        
         return bin_centers, mean_binned_values
-
-# Wrapper for scipy.optimize.curve_fit (cannot use numba directly)
-def model_f(Phi_ext, I_c, phi_0, f, T, r, C):
-    """Wrapper function for curve_fit compatibility"""
-    return model_f_numba(Phi_ext, I_c, phi_0, f, T, r, C)
 
 # Cached frequency array generation
 @lru_cache(maxsize=128)
@@ -319,16 +405,16 @@ class EnhancedJosephsonProcessor:
         # Pre-compile numba functions
         self._precompile_numba()
         
-        self.logger.logger.info(f"Initialized EnhancedJosephsonProcessor")
-        self.logger.logger.info(f"Using FireDucks pandas: {USING_FIREDUCKS}")
-        self.logger.logger.info(f"Using Numba optimization: {HAS_NUMBA}")
-        self.logger.logger.info(f"Max workers: {MAX_WORKERS}")
-        self.logger.logger.info(f"Plot size: {PLOT_SIZE} at {PLOT_DPI} DPI")
+        self.logger.info(f"Initialized EnhancedJosephsonProcessor")
+        self.logger.info(f"Using FireDucks pandas: {USING_FIREDUCKS}")
+        self.logger.info(f"Using Numba optimization: {HAS_NUMBA}")
+        self.logger.info(f"Max workers: {MAX_WORKERS}")
+        self.logger.info(f"Plot size: {PLOT_SIZE} at {PLOT_DPI} DPI")
     
     def _precompile_numba(self):
         """Pre-compile numba functions for better performance with thread safety"""
         with NUMBA_COMPILATION_LOCK:  # Ensure only one thread compiles at a time
-            self.logger.logger.info("Pre-compiling Numba functions...")
+            self.logger.info("Pre-compiling Numba functions...")
             try:
                 # Dummy compilation
                 dummy_x = np.array([1.0, 2.0, 3.0], dtype=np.float64)
@@ -340,12 +426,12 @@ class EnhancedJosephsonProcessor:
                     _ = preprocess_data_numba(dummy_x, dummy_y)
                     _ = calculate_phase_data_numba(dummy_x, 1.0)
                     _ = calculate_binned_average_numba(dummy_x/2, dummy_y)
-                    self.logger.logger.info("✓ Numba functions compiled successfully")
+                    self.logger.info("✓ Numba functions compiled successfully")
                 else:
-                    self.logger.logger.info("✓ Using non-Numba implementations")
+                    self.logger.info("✓ Using non-Numba implementations")
                     
             except Exception as e:
-                self.logger.logger.warning(f"Numba compilation warning: {e}")
+                self.logger.warning(f"Numba compilation warning: {e}")
 
     def validate_data_array(self, data, name):
         """Validate data array for NaN/inf values and provide detailed diagnostics"""
@@ -418,7 +504,7 @@ class EnhancedJosephsonProcessor:
                     message = f"{status} [{current}/{total}] {dataid}"
                     if not success and error_msg:
                         message += f": {error_msg[:50]}..."
-                    self.logger.logger.info(message)
+                    self.logger.info(message)
                     
         except (BrokenPipeError, OSError):
             # Handle pipe errors gracefully
@@ -983,6 +1069,8 @@ class EnhancedJosephsonProcessor:
         """
         if output_dir is None:
             output_dir = self.config.get('OUTPUT_FOLDER', 'output')
+        if output_dir is None:
+            output_dir = 'output'
         
         if not csv_files:
             self.safe_print("No CSV files provided to process")
@@ -992,7 +1080,7 @@ class EnhancedJosephsonProcessor:
         self.safe_print(f"Using {MAX_WORKERS} worker threads for parallel processing")
         
         # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(str(output_dir), exist_ok=True)
         
         # Record start time
         start_time = time.time()
@@ -1065,7 +1153,7 @@ class EnhancedJosephsonProcessor:
         if results:
             try:
                 summary_df = pd.DataFrame(results)
-                summary_path = os.path.join(output_dir, 'analysis_summary.csv')
+                summary_path = os.path.join(str(output_dir), 'analysis_summary.csv')
                 summary_df.to_csv(summary_path, index=False)
                 self.safe_print(f"Summary saved to: {summary_path}")
             except Exception as e:
@@ -1078,10 +1166,14 @@ class EnhancedJosephsonProcessor:
     def batch_process_files(self):
         """Process all CSV files in the input folder using multithreading"""
         input_folder = self.config.get('INPUT_FOLDER', 'data/Ic')
+        if input_folder is None:
+            input_folder = 'data/Ic'
         output_folder = self.config.get('OUTPUT_FOLDER', 'output')
+        if output_folder is None:
+            output_folder = 'output'
         
         # Find all CSV files in the input folder
-        csv_files = glob.glob(os.path.join(input_folder, "*.csv"))
+        csv_files = glob.glob(os.path.join(str(input_folder), "*.csv"))
         
         if not csv_files:
             self.safe_print(f"No CSV files found in {input_folder}")
@@ -1091,7 +1183,7 @@ class EnhancedJosephsonProcessor:
         self.safe_print(f"Using {MAX_WORKERS} worker threads for parallel processing")
         
         # Create output directory
-        os.makedirs(output_folder, exist_ok=True)
+        os.makedirs(str(output_folder), exist_ok=True)
         
         # Record start time
         start_time = time.time()
@@ -1163,7 +1255,7 @@ class EnhancedJosephsonProcessor:
         if results:
             try:
                 summary_df = pd.DataFrame(results)
-                summary_path = os.path.join(output_folder, 'analysis_summary.csv')
+                summary_path = os.path.join(str(output_folder), 'analysis_summary.csv')
                 summary_df.to_csv(summary_path, index=False)
                 self.safe_print(f"Summary saved to: {summary_path}")
             except Exception as e:
@@ -1196,7 +1288,7 @@ class EnhancedJosephsonProcessor:
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                self.logger.logger.error(f"Matplotlib operation failed: {e}")
+                self.logger.error(f"Matplotlib operation failed: {e}")
                 raise
     
     def create_plot_safely(self, plot_func, filename, *args, **kwargs):
